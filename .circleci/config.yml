@@ -1,0 +1,438 @@
+---
+version: 2.1
+
+parameters:
+  machine:
+    type: string
+    default: "ubuntu-2004:202201-02"
+  workspace:
+    type: string
+    default: "/tmp/workspace"
+
+orbs:
+  aws-cli: circleci/aws-cli@0.1.16
+  vpn_client: cvs-digital/openvpn-client@0
+  bashenv-asm: cvs-digital/bashenv-asm@0
+  docker-builder: cvs-digital/docker-builder@1
+  maven: cvs-digital/maven@0
+  twistlock: cvs-digital/twistlock@0
+  checkmarx: cvs-digital/checkmarx@0
+  sonar_scan: aetna/sonar_scan@0
+  snyk: cvs-digital/snyk@2
+  semantic-release: cvs-digital/semantic-release@1
+
+env-vpn: &env-vpn
+  - bashenv-asm/add:
+      secret_id: ${AWS_SECRET_MANAGER_ID_VPN}
+      env_map: |
+        {
+          "VPN_CONFIG" : "config",
+          "VPN_USERNAME" : "username",
+          "VPN_PASSWORD" : "password"
+        }
+env-snyk: &env-snyk
+  bashenv-asm/add:
+    secret_id: ${AWS_SECRET_MANAGER_ID_GLOBAL}
+    env_map: |
+      {
+        "SNYK_TOKEN" : "${snyk_token}",
+        "SNYK_ORG": "${snyk_org}"
+      }
+env-twistlock: &env-twistlock
+  - bashenv-asm/add:
+      secret_id: ${AWS_SECRET_MANAGER_ID_GLOBAL}
+      env_map: |
+        {
+          "TL_USER" : "twistlock-user-pass-username",
+          "TL_PASS" : "twistlock-user-pass-password",
+          "TL_URL" : "twistlock-server-url"
+        }
+env-docker-reg: &env-docker-reg
+  - bashenv-asm/add:
+      secret_id: ${AWS_SECRET_MANAGER_ID_GLOBAL}
+      env_map: |
+        {
+          "DOCKER_REGISTRY_URL" : "registry-server-url",
+          "DOCKER_REGISTRY_PATH" : "registry-docker-path",
+          "DOCKER_REGISTRY_PULL_URL": "registry-pull-server-url",
+          "DOCKER_REGISTRY_USERNAME": "registry-user-pass-username",
+          "DOCKER_REGISTRY_PASSWORD" : "registry-user-pass-password"
+        }
+env-checkmarx: &env-checkmarx
+  - bashenv-asm/add:
+      secret_id: ${AWS_SECRET_MANAGER_ID_GLOBAL}
+      env_map: |
+        {
+          "CX_PASSWORD" : "checkmarx-user-pass-password",
+          "CX_USERNAME" : "checkmarx-user-pass-username",
+          "CX_SERVER" : "checkmarx-server-url",
+          "CX_ORG" : "checkmarx-org-path"
+        }
+env-sonarcloud: &env-sonarcloud
+  - bashenv-asm/add:
+      secret_id: ${AWS_SECRET_MANAGER_ID_GLOBAL}
+      env_map: |
+        {
+          "SONAR_LOGIN" : "sonar-login-token",
+          "SONAR_URL" : "sonar-server-url"
+        }
+env-maven: &env-maven
+  - run:
+      name: Setting Gradle project information as BASH_ENV
+      command: |
+        echo "export CCI_MAVEN_PROJECT_ARTIFACT_ID=$(mvn org.apache.maven.plugins:maven-help-plugin:3.1.0:evaluate -Dexpression=project.artifactId -q -DforceStdout)" >> ${BASH_ENV}
+        echo "export CCI_MAVEN_PROJECT_VERSION=$(mvn org.apache.maven.plugins:maven-help-plugin:3.1.0:evaluate -Dexpression=project.version -q -DforceStdout)" >> ${BASH_ENV}
+env-github: &env-github
+  - bashenv-asm/add:
+      secret_id: ${AWS_SECRET_MANAGER_ID_GLOBAL}
+      env_map: |
+        {
+          "GITHUB_TOKEN" : "github-api-token"
+        }
+env-pact: &env-pact
+  - run:
+      name: Setting Pact env vars
+      command: |
+        echo "export PACT_BROKER_URL=$PACT_BROKER_URL" >> ${BASH_ENV}
+        echo "export PACT_BROKER_USERNAME=$PACT_BROKER_USERNAME" >> ${BASH_ENV}
+        echo "export PACT_BROKER_PASSWORD=$PACT_BROKER_PASSWORD" >> ${BASH_ENV}
+jobs:
+  build-jar:
+    machine:
+      image: << pipeline.parameters.machine >>
+    steps:
+      - checkout
+      - aws-cli/setup
+      - <<: *env-vpn
+      - <<: *env-maven
+      - vpn_client/connect
+      - maven/init:
+          settings: ${MAVEN_SETTINGS}
+          circleci_openjdk_tag: 11-jdk
+      - maven/test:
+          store_test_results: true
+      - maven/package:
+          skipTest: true
+          store_artifacts: true
+          store_path: target/${CCI_MAVEN_PROJECT_ARTIFACT_ID}-${CCI_MAVEN_PROJECT_VERSION}.jar
+      - persist_to_workspace:
+          root: ./target
+          paths:
+            - "*.jar"
+      - persist_to_workspace:
+          root: .
+          paths:
+            - ./target
+      - store_artifacts:
+          path: target/jacoco.exec
+
+  build-docker:
+    machine:
+      image: << pipeline.parameters.machine >>
+    steps:
+      - checkout
+      - aws-cli/setup
+      - <<: *env-vpn
+      - <<: *env-maven
+      - attach_workspace:
+          at: /tmp/workspace
+      - vpn_client/connect
+      - run: |
+          mkdir -p image #create temp directory to copy jar file from workspace
+          cp /tmp/workspace/${CCI_MAVEN_PROJECT_ARTIFACT_ID}-${CCI_MAVEN_PROJECT_VERSION}.jar image # copy jar file from workspace since docker build cannot access to workspace
+          docker build \
+            --network=host \
+            --build-arg jarPath=image \
+            --build-arg jarName=${CCI_MAVEN_PROJECT_ARTIFACT_ID}-${CCI_MAVEN_PROJECT_VERSION}.jar \
+            --label origin=health-cloud \
+            --rm -t \
+            ${CIRCLE_PROJECT_REPONAME}:${CIRCLE_SHA1:0:7} .
+          docker save -o image.tar ${CIRCLE_PROJECT_REPONAME}:${CIRCLE_SHA1:0:7}
+      - persist_to_workspace:
+          root: .
+          paths:
+            - image.tar
+      - vpn_client/disconnect
+
+  scan-twistlock:
+    machine:
+      image: << pipeline.parameters.machine >>
+    steps:
+      - checkout
+      - aws-cli/setup
+      - <<: *env-vpn
+      - <<: *env-twistlock
+      - <<: *env-docker-reg
+      - vpn_client/connect
+      - run: sudo sh -c "echo '172.16.36.35  twistlockconsole.healthehost.com' >> /etc/hosts"
+      - attach_workspace:
+          at: /tmp/workspace
+      - twistlock/scan:
+          tl_image_tar: "image.tar"
+          tl_workspace_name: "/tmp/workspace"
+          tl_image: ${CIRCLE_PROJECT_REPONAME}:${CIRCLE_SHA1:0:7}
+      - vpn_client/disconnect
+  publish-docker:
+    machine:
+      image: << pipeline.parameters.machine >>
+    parameters:
+      isRelease:
+        description: |
+          flag for docker image tag type.
+          If it is true version in the relase.version file will be used for tag. if it is not git-sha will be used for the tag.
+        type: boolean
+        default: false
+    steps:
+      - checkout
+      - aws-cli/setup
+      - <<: *env-vpn
+      - <<: *env-docker-reg
+      - vpn_client/connect
+      - attach_workspace:
+          at: /tmp/workspace
+      - when:
+          condition: << parameters.isRelease >>
+          steps:
+            - run:
+                name: "Set tag as version from release.version file"
+                command: |
+                  echo "export CCI_DOCKER_BUILD_RELEASE_TAG=$(cat /tmp/workspace/release.version)" >> ${BASH_ENV}
+      - unless:
+          condition: << parameters.isRelease >>
+          steps:
+            - run:
+                name: "Set tag as CIRCLE_SHA1:0:7"
+                command: |
+                  echo "export CCI_DOCKER_BUILD_RELEASE_TAG=${CIRCLE_SHA1:0:7}" >> ${BASH_ENV}
+      - run:
+          name: "Tag and push Docker Image"
+          command: |
+            docker load -i /tmp/workspace/image.tar
+            docker login ${DOCKER_REGISTRY_URL} --username ${DOCKER_REGISTRY_USERNAME} --password ${DOCKER_REGISTRY_PASSWORD}
+            docker tag ${CIRCLE_PROJECT_REPONAME}:${CIRCLE_SHA1:0:7} ${DOCKER_REGISTRY_URL}/${DOCKER_REGISTRY_PATH}/${CIRCLE_PROJECT_REPONAME}:${CCI_DOCKER_BUILD_RELEASE_TAG}
+            docker push ${DOCKER_REGISTRY_URL}/${DOCKER_REGISTRY_PATH}/${CIRCLE_PROJECT_REPONAME}:${CCI_DOCKER_BUILD_RELEASE_TAG}
+            docker logout
+  scan-checkmarx:
+    machine:
+      image: << pipeline.parameters.machine >>
+    steps:
+      - checkout
+      - aws-cli/setup
+      - <<: *env-vpn
+      - <<: *env-checkmarx
+      - <<: *env-docker-reg
+      - vpn_client/connect
+      - checkmarx/scan:
+          sast_high: 7
+          sast_med: 20
+          sast_low: 64
+      - vpn_client/disconnect
+
+  # the other steps can get the next version from release.version file that is saved in workspace
+  release-version:
+    executor: semantic-release/default
+    steps:
+      - checkout
+      - aws-cli/setup
+      - <<: *env-github
+      - semantic-release/install
+      - semantic-release/config
+      - semantic-release/execute
+      - persist_to_workspace:
+          root: .
+          paths:
+            - release.version
+
+  scan-snyk:
+    machine:
+      image: << pipeline.parameters.machine >>
+    parameters:
+      send-to-console:
+        type: boolean
+        default: true
+    steps:
+      - checkout
+      - aws-cli/setup
+      - <<: *env-vpn
+      - <<: *env-maven
+      - vpn_client/connect
+      - maven/init:
+          settings: ${MAVEN_SETTINGS}
+          circleci_openjdk_tag: 11-jdk
+      - <<: *env-snyk
+      - snyk/scan:
+          all-projects: true
+          send-to-console: << parameters.send-to-console >>
+      - vpn_client/disconnect 
+
+  init-sonar-project:
+    # use circleci/python:2.7-stretch docker image as excutor which is default excutor of circleci/aws-cli orb
+    docker:
+      - image: circleci/python:2.7-stretch
+    steps:
+      - aws-cli/setup
+      - <<: *env-sonarcloud
+      - run:
+          name: "Create the SonarCloud project"
+          command: |
+            set -x
+            curl -u ${SONAR_LOGIN}: \
+              -d "name=${CIRCLE_PROJECT_REPONAME}&organization=${GITHUB_ORG}&project=${GITHUB_ORG}_${CIRCLE_PROJECT_REPONAME}" \
+              -X POST "${SONAR_URL}/api/projects/create"
+workflows:
+  pull_request:
+    jobs:
+      - build-jar:
+          context: cci-global
+          filters:
+            branches:
+              ignore:
+                - master
+
+      - init-sonar-project:
+          context: cci-global
+          filters:
+            branches:
+              ignore:
+                - master
+
+      - sonar_scan/pull_request:
+          name: scan-sonarcloud-pr
+          context: cci-global
+          requires:
+            - init-sonar-project
+            - build-jar
+          attach_workspace_at: .
+          filters:
+            branches:
+              ignore:
+                - master
+
+      - build-docker:
+          context: cci-global
+          requires:
+            - build-jar
+          filters:
+            branches:
+              ignore:
+                - master
+
+      - scan-checkmarx:
+         context: cci-global
+         filters:
+           branches:
+             ignore:
+               - master
+
+      - scan-twistlock:
+          context: cci-global
+          requires:
+            - build-docker
+          filters:
+            branches:
+              ignore:
+                - master
+
+      - scan-snyk:
+          context: cci-global
+          send-to-console: false
+          filters:
+            branches:
+              ignore:
+                - master
+
+      - publish-docker:
+          context: cci-global
+          requires:
+            - scan-snyk
+            - scan-checkmarx
+            - scan-twistlock
+            - scan-sonarcloud-pr
+          filters:
+            branches:
+              ignore:
+                - master
+
+  on_merge:
+    jobs:
+      - build-jar:
+          context: cci-global
+          filters:
+            branches:
+              only:
+                - master
+
+      - init-sonar-project:
+          context: cci-global
+          filters:
+            branches:
+              only:
+                - master
+
+      - sonar_scan/branch:
+          name: scan-sonarcloud-branch
+          context: cci-global
+          requires:
+            - init-sonar-project
+            - build-jar
+          attach_workspace_at: .
+          filters:
+            branches:
+              only:
+                - master
+
+      - scan-checkmarx:
+         context: cci-global
+         filters:
+           branches:
+             only:
+               - master
+
+      - build-docker:
+          context: cci-global
+          requires:
+            - build-jar
+          filters:
+            branches:
+              only:
+                - master
+
+      - scan-twistlock:
+          context: cci-global
+          requires:
+            - build-docker
+          filters:
+            branches:
+              only:
+                - master
+
+      - scan-snyk:
+          context: cci-global
+          send-to-console: true
+          requires:
+            - build-docker
+          filters:
+            branches:
+              only:
+                - master
+
+      - release-version:
+          context: cci-global
+          requires:
+            - build-jar
+            - build-docker
+            # - scan-sonarcloud-branch
+            - scan-snyk
+          filters:
+            branches:
+              only: master
+
+      - publish-docker:
+          name: publish-docker-release
+          isRelease: true
+          context: cci-global
+          requires:
+            - release-version
+          filters:
+            branches:
+              only: master

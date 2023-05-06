@@ -1,0 +1,11 @@
+{
+  "contact": "DL202101101229047812@AETNA.com",
+  "cost_center": "94466",
+  "data_classification": "confidential",
+  "environment": "development",
+  "metadata_version": "2",
+  "owner": "FAS - Falcon",
+  "project_type": "docker-api",
+  "source_repo": "aetna-digital-applications/hc-auth0-metric-scraper",
+  "train": "none"
+}

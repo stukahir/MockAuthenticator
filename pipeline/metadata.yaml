@@ -1,0 +1,6 @@
+microservice:
+  name: mock-authenticator
+  domain: ciam
+
+ownerLabels:
+  pod-owner: hc-falcon

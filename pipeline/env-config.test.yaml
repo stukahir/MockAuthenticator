@@ -1,0 +1,35 @@
+replicas: 1
+resources:
+  requests:
+    cpu: 1000m
+    memory: 1024Mi
+  limits:
+    cpu: 1500m
+    memory: 2048Mi
+internalPort: 8080
+livenessProbe:
+  httpGet:
+    path: /actuator/health
+readinessProbe:
+  httpGet:
+    path: /actuator/health
+    
+env:
+  ENVIRONMENT: ${env.name}
+  NEW_RELIC_HIGH_SECURITY: true
+  NEW_RELIC_APP_NAME: mock-authenticator-${env.name}
+  NEW_RELIC_LICENSE_KEY: vault:kv/health-cloud-revolutionary/${env.name}/newrelic/global#license-key
+  OTEL_PROPAGATORS: b3
+  OTEL_METRICS_EXPORTER: none
+  OTEL_TRACES_EXPORTER: jaeger  
+  OTEL_EXPORTER_JAEGER_ENDPOINT: http://trace-collector.otel.svc.cluster.local:14250
+  OTEL_RESOURCE_ATTRIBUTES: service.name=mock-authenticator
+  
+specTemplateMetadataAnnotations:
+  prometheus.io/scrape: true # determines if a pod should be scraped. Set to true to enable scraping.
+  prometheus.io/path: /actuator/prometheus # determines the path to scrape metrics at. Defaults to /metrics.
+  prometheus.io/port: 8080 # determines the port to scrape metrics at. Defaults to 80.
+  
+metadataAnnotations:
+  metrics.observability.dfp.hc.aetna.com/enhancedSignals: true
+  metrics.observability.dfp.hc.aetna.com/contractUrl: https://github.com/aetna-digital-applications/hc-api-contracts/blob/master/mock-authenticator/api-docs.yaml
