@@ -1,5 +1,5 @@
 microservice:
-  name: mock-authenticator
+  name: ciam-mock-authenticator
   domain: ciam
 
 ownerLabels:

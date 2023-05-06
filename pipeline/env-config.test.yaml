@@ -17,13 +17,13 @@ readinessProbe:
 env:
   ENVIRONMENT: ${env.name}
   NEW_RELIC_HIGH_SECURITY: true
-  NEW_RELIC_APP_NAME: mock-authenticator-${env.name}
+  NEW_RELIC_APP_NAME: ciam-mock-authenticator-${env.name}
   NEW_RELIC_LICENSE_KEY: vault:kv/health-cloud-revolutionary/${env.name}/newrelic/global#license-key
   OTEL_PROPAGATORS: b3
   OTEL_METRICS_EXPORTER: none
   OTEL_TRACES_EXPORTER: jaeger  
   OTEL_EXPORTER_JAEGER_ENDPOINT: http://trace-collector.otel.svc.cluster.local:14250
-  OTEL_RESOURCE_ATTRIBUTES: service.name=mock-authenticator
+  OTEL_RESOURCE_ATTRIBUTES: service.name=ciam-mock-authenticator
   
 specTemplateMetadataAnnotations:
   prometheus.io/scrape: true # determines if a pod should be scraped. Set to true to enable scraping.
@@ -32,4 +32,4 @@ specTemplateMetadataAnnotations:
   
 metadataAnnotations:
   metrics.observability.dfp.hc.aetna.com/enhancedSignals: true
-  metrics.observability.dfp.hc.aetna.com/contractUrl: https://github.com/aetna-digital-applications/hc-api-contracts/blob/master/mock-authenticator/api-docs.yaml
+  metrics.observability.dfp.hc.aetna.com/contractUrl: https://github.com/aetna-digital-applications/hc-api-contracts/blob/master/ciam-mock-authenticator/api-docs.yaml
